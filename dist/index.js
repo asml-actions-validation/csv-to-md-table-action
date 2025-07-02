@@ -2820,10 +2820,33 @@ var __webpack_exports__ = {};
 const core = __nccwpck_require__(186);
 
 /**
+ * Fast path: Parse simple CSV (no quotes, no embedded newlines) using regex
+ */
+function parseSimpleCSV(csvString) {
+  const lines = csvString.trim().split(/\r?\n/);
+  return lines.map((line) => line.split(',').map((cell) => cell.trim()));
+}
+
+/**
+ * Detect if CSV is simple (no quotes, no embedded commas in values)
+ */
+function isSimpleCSV(csvString) {
+  // Quick heuristic: if no quotes and reasonable line count, likely simple
+  return !csvString.includes('"') && csvString.split('\n').length < 10000;
+}
+
+/**
  * Parse CSV string and return array of rows, each row being an array of cells
  * Handles quoted fields that may contain commas and newlines
+ * Optimized version with fast path for simple CSVs
  */
 function parseCSV(csvString) {
+  // Fast path for simple CSVs
+  if (isSimpleCSV(csvString)) {
+    return parseSimpleCSV(csvString);
+  }
+
+  // Complex path for CSVs with quotes/embedded content
   const rows = [];
   let currentRow = [];
   let currentCell = '';
@@ -2894,60 +2917,97 @@ function parseCSV(csvString) {
 }
 
 /**
+ * Optimized column width calculation - single pass
+ */
+function calculateColumnWidths(rows) {
+  if (rows.length === 0) return [];
+
+  const columnCount = Math.max(...rows.map((row) => row.length));
+  const columnWidths = new Array(columnCount).fill(3); // Minimum width for "---"
+
+  // Single pass through all rows to calculate max widths
+  rows.forEach((row) => {
+    for (let i = 0; i < columnCount; i += 1) {
+      const cellLength = (row[i] || '').length;
+      if (cellLength > columnWidths[i]) {
+        columnWidths[i] = cellLength;
+      }
+    }
+  });
+
+  return columnWidths;
+}
+
+/**
+ * Memoized padding cache for performance
+ */
+const paddingCache = new Map();
+
+function getPaddedString(str, width) {
+  const cacheKey = `${str.length}:${width}`;
+  if (paddingCache.has(cacheKey)) {
+    return str + paddingCache.get(cacheKey);
+  }
+
+  const padding = ' '.repeat(Math.max(0, width - str.length));
+  paddingCache.set(cacheKey, padding);
+  return str + padding;
+}
+
+/**
  * Convert parsed CSV rows to markdown table format
+ * Optimized version with efficient string building
  */
 function convertToMarkdownTable(rows) {
   if (rows.length === 0) {
     return '';
   }
 
-  // Calculate maximum width for each column for proper alignment
-  const columnCount = Math.max(...rows.map((row) => row.length));
-  const columnWidths = new Array(columnCount).fill(0);
+  const columnWidths = calculateColumnWidths(rows);
+  const columnCount = columnWidths.length;
 
-  // Ensure all rows have the same number of columns
+  // Pre-allocate result array for efficiency
+  const result = [];
+
+  // Normalize all rows to have the same number of columns
   const normalizedRows = rows.map((row) => {
-    const normalizedRow = [...row];
-    while (normalizedRow.length < columnCount) {
-      normalizedRow.push('');
+    const normalized = new Array(columnCount);
+    for (let i = 0; i < columnCount; i += 1) {
+      normalized[i] = row[i] || '';
     }
-    return normalizedRow;
+    return normalized;
   });
 
-  // Calculate column widths
-  normalizedRows.forEach((row) => {
-    row.forEach((cell, index) => {
-      columnWidths[index] = Math.max(columnWidths[index], cell.length);
-    });
-  });
+  // Build header row
+  const headerParts = ['|'];
+  for (let i = 0; i < columnCount; i += 1) {
+    headerParts.push(` ${getPaddedString(normalizedRows[0][i], columnWidths[i])} |`);
+  }
+  result.push(headerParts.join(''));
 
-  // Ensure minimum width for separator row
-  columnWidths.forEach((width, index) => {
-    columnWidths[index] = Math.max(width, 3); // Minimum width for "---"
-  });
+  // Build separator row
+  const separatorParts = ['|'];
+  for (let i = 0; i < columnCount; i += 1) {
+    separatorParts.push(` ${'-'.repeat(columnWidths[i])} |`);
+  }
+  result.push(separatorParts.join(''));
 
-  // Create markdown table
-  const markdownRows = [];
-
-  // Add header row
-  const headerRow = `| ${normalizedRows[0].map((cell, index) => cell.padEnd(columnWidths[index])).join(' | ')} |`;
-  markdownRows.push(headerRow);
-
-  // Add separator row
-  const separatorRow = `| ${columnWidths.map((width) => '-'.repeat(width)).join(' | ')} |`;
-  markdownRows.push(separatorRow);
-
-  // Add data rows
-  for (let i = 1; i < normalizedRows.length; i += 1) {
-    const dataRow = `| ${normalizedRows[i].map((cell, index) => cell.padEnd(columnWidths[index])).join(' | ')} |`;
-    markdownRows.push(dataRow);
+  // Build data rows
+  for (let rowIndex = 1; rowIndex < normalizedRows.length; rowIndex += 1) {
+    const rowParts = ['|'];
+    for (let colIndex = 0; colIndex < columnCount; colIndex += 1) {
+      const cell = normalizedRows[rowIndex][colIndex];
+      rowParts.push(` ${getPaddedString(cell, columnWidths[colIndex])} |`);
+    }
+    result.push(rowParts.join(''));
   }
 
-  return markdownRows.join('\n');
+  return result.join('\n');
 }
 
 /**
  * Convert CSV string to markdown table
+ * Optimized version with performance improvements
  */
 function csvToMarkdown(csvString) {
   const rows = parseCSV(csvString);
@@ -2971,12 +3031,15 @@ async function convertCSVToMarkdown() {
     // Log input size for monitoring
     const inputSize = csvinput.length;
     const lineCount = csvinput.split('\n').length;
+    const isSimple = isSimpleCSV(csvinput);
+
     core.info(`Processing CSV: ${inputSize} characters, ${lineCount} lines`);
+    core.info(`Parser mode: ${isSimple ? 'Fast (simple CSV)' : 'Robust (complex CSV)'}`);
 
     // Performance monitoring
     const startTime = process.hrtime.bigint();
 
-    // Convert CSV to markdown using our custom implementation
+    // Convert CSV to markdown using our optimized implementation
     const markdownTable = csvToMarkdown(csvinput);
 
     // Calculate processing time
@@ -2991,6 +3054,7 @@ async function convertCSVToMarkdown() {
     // Log performance metrics
     core.info(`Conversion completed in ${processingTimeMs.toFixed(2)}ms`);
     core.info(`Output size: ${markdownTable.length} characters`);
+    core.info(`Processing rate: ${(((inputSize / processingTimeMs) * 1000) / 1024 / 1024).toFixed(2)} MB/s`);
 
     // Output the markdown table to stdout (for backward compatibility with tests)
     console.log(`Markdown table Created:\n${markdownTable}`);
