@@ -7,6 +7,9 @@
     "lint": "eslint .",
     "prepare": "ncc build index.js -o dist --source-map --license licenses.txt",
     "test": "jest",
+    "test:unit": "jest index.test.js",
+    "test:integration": "jest integration.test.js",
+    "test:all": "jest --verbose",
     "all": "npm run lint && npm run prepare && npm run test"
   },
   "repository": {

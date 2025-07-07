@@ -1,31 +1,242 @@
-name: "units-test"
+name: "Test Suite"
 on:
   pull_request:
   push:
     branches:
       - master
+      - main
       - 'releases/*'
 
-jobs:
-  # unit tests
-  unit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - run: npm ci
-      - run: npm test
+env:
+  NODE_VERSION: '20'
 
-  # test action works running from the graph
-  test:
+jobs:
+  # Unit tests
+  unit-tests:
     runs-on: ubuntu-latest
+    name: Unit Tests
     steps:
-    - uses: actions/checkout@v2
-    - uses: ./
-      with:
-        csvinput: |
-          First Name, Last Name, Address, Town, State, Zip
-          John,Doe,120 jefferson st.,Riverside, NJ, 08075
-          Jack,McGinnis,220 hobo Av.,Phila, PA,09119
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Run linter
+        run: npm run lint
+      
+      - name: Run unit tests
+        run: npm test
+
+  # Integration tests - Test the action from the repository itself
+  integration-tests:
+    runs-on: ubuntu-latest
+    name: Integration Tests
+    needs: unit-tests
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test Basic CSV Conversion
+        uses: ./
+        id: basic-test
+        with:
+          csvinput: |
+            First Name,Last Name,Address,Town,State,Zip
+            John,Doe,120 jefferson st.,Riverside,NJ,08075
+            Jack,McGinnis,220 hobo Av.,Phila,PA,09119
+
+      - name: Verify Basic Test Output
+        run: |
+          echo "Testing basic CSV conversion output..."
+          echo "${{ steps.basic-test.outputs.markdown-table }}"
+          # Check that output contains expected table structure
+          if [[ "${{ steps.basic-test.outputs.markdown-table }}" == *"| First Name | Last Name | Address | Town | State | Zip |"* ]]; then
+            echo "✅ Basic test passed - header row found"
+          else
+            echo "❌ Basic test failed - header row not found"
+            exit 1
+          fi
+
+      - name: Test CSV with Quoted Fields
+        uses: ./
+        id: quoted-test
+        with:
+          csvinput: |
+            Name,Description,Status
+            "Smith, John","A person with comma in name",Active
+            "Doe, Jane","Another person with, multiple, commas",Inactive
+
+      - name: Verify Quoted Fields Test
+        run: |
+          echo "Testing quoted fields output..."
+          echo "${{ steps.quoted-test.outputs.markdown-table }}"
+          if [[ "${{ steps.quoted-test.outputs.markdown-table }}" == *"Smith, John"* ]]; then
+            echo "✅ Quoted fields test passed"
+          else
+            echo "❌ Quoted fields test failed"
+            exit 1
+          fi
+
+      - name: Test Empty Fields CSV
+        uses: ./
+        id: empty-fields-test
+        with:
+          csvinput: |
+            Name,Email,Phone
+            John,,123-456-7890
+            ,jane@example.com,
+            Bob,bob@example.com,555-0123
+
+      - name: Verify Empty Fields Test
+        run: |
+          echo "Testing empty fields output..."
+          echo "${{ steps.empty-fields-test.outputs.markdown-table }}"
+          if [[ "${{ steps.empty-fields-test.outputs.markdown-table }}" == *"| John |"* ]]; then
+            echo "✅ Empty fields test passed"
+          else
+            echo "❌ Empty fields test failed"
+            exit 1
+          fi
+
+      - name: Test Single Column CSV
+        uses: ./
+        id: single-column-test
+        with:
+          csvinput: |
+            Numbers
+            1
+            2
+            3
+
+      - name: Verify Single Column Test
+        run: |
+          echo "Testing single column output..."
+          echo "${{ steps.single-column-test.outputs.markdown-table }}"
+          if [[ "${{ steps.single-column-test.outputs.markdown-table }}" == *"| Numbers |"* ]]; then
+            echo "✅ Single column test passed"
+          else
+            echo "❌ Single column test failed"
+            exit 1
+          fi
+
+  # Parameter validation tests
+  parameter-validation-tests:
+    runs-on: ubuntu-latest
+    name: Parameter Validation Tests
+    needs: unit-tests
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test Missing Input Parameter (should fail)
+        uses: ./
+        id: missing-input-test
+        continue-on-error: true
+        # No csvinput parameter provided
+
+      - name: Verify Missing Input Test Failed
+        run: |
+          if [[ "${{ steps.missing-input-test.outcome }}" == "failure" ]]; then
+            echo "✅ Missing input parameter test passed - action correctly failed"
+          else
+            echo "❌ Missing input parameter test failed - action should have failed"
+            exit 1
+          fi
+
+      - name: Test Empty Input Parameter (should fail)
+        uses: ./
+        id: empty-input-test
+        continue-on-error: true
+        with:
+          csvinput: ""
+
+      - name: Verify Empty Input Test Failed
+        run: |
+          if [[ "${{ steps.empty-input-test.outcome }}" == "failure" ]]; then
+            echo "✅ Empty input parameter test passed - action correctly failed"
+          else
+            echo "❌ Empty input parameter test failed - action should have failed"
+            exit 1
+          fi
+
+  # Performance tests
+  performance-tests:
+    runs-on: ubuntu-latest
+    name: Performance Tests
+    needs: unit-tests
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate Large CSV for Performance Test
+        id: generate-csv
+        run: |
+          # Generate a CSV with 1000 rows
+          echo "ID,Name,Email,Department,Salary" > large_test.csv
+          for i in {1..1000}; do
+            echo "${i},Person${i},person${i}@example.com,Dept$((i % 10)),$((50000 + i * 100))" >> large_test.csv
+          done
+          
+          # Read the CSV content
+          CSV_CONTENT=$(cat large_test.csv)
+          echo "csv-content<<EOF" >> $GITHUB_OUTPUT
+          echo "$CSV_CONTENT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Test Large CSV Performance
+        uses: ./
+        id: performance-test
+        with:
+          csvinput: ${{ steps.generate-csv.outputs.csv-content }}
+
+      - name: Verify Performance Test
+        run: |
+          echo "Testing large CSV performance..."
+          # Check that the output contains expected number of rows
+          row_count=$(echo "${{ steps.performance-test.outputs.markdown-table }}" | grep -c "|")
+          if [[ $row_count -gt 1000 ]]; then
+            echo "✅ Performance test passed - processed large CSV successfully"
+          else
+            echo "❌ Performance test failed - insufficient rows processed"
+            exit 1
+          fi
+
+  # Cross-platform tests
+  cross-platform-tests:
+    runs-on: ${{ matrix.os }}
+    name: Cross-Platform Tests
+    needs: unit-tests
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test Cross-Platform Compatibility
+        uses: ./
+        id: cross-platform-test
+        with:
+          csvinput: |
+            OS,Version,Status
+            Ubuntu,20.04,Active
+            Windows,Server 2019,Active
+            macOS,Big Sur,Active
+
+      - name: Verify Cross-Platform Test
+        run: |
+          echo "Testing cross-platform compatibility on ${{ matrix.os }}..."
+          output="${{ steps.cross-platform-test.outputs.markdown-table }}"
+          if [[ "$output" == *"| OS | Version | Status |"* ]]; then
+            echo "✅ Cross-platform test passed on ${{ matrix.os }}"
+          else
+            echo "❌ Cross-platform test failed on ${{ matrix.os }}"
+            exit 1
+          fi

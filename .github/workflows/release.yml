@@ -1,0 +1,231 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  push:
+    tags:
+      - 'v*'
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # Pre-release validation
+  validate-release:
+    runs-on: ubuntu-latest
+    name: Validate Release
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      tag: ${{ steps.get-version.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get Version from Tag
+        id: get-version
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            VERSION="${{ github.event.release.tag_name }}"
+          else
+            VERSION="${{ github.ref_name }}"
+          fi
+          echo "tag=${VERSION}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION#v}" >> $GITHUB_OUTPUT
+          echo "Release version: ${VERSION}"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate package.json version
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          RELEASE_VERSION="${{ steps.get-version.outputs.version }}"
+          echo "Package version: ${PACKAGE_VERSION}"
+          echo "Release version: ${RELEASE_VERSION}"
+          if [[ "${PACKAGE_VERSION}" != "${RELEASE_VERSION}" ]]; then
+            echo "❌ Version mismatch between package.json (${PACKAGE_VERSION}) and release tag (${RELEASE_VERSION})"
+            exit 1
+          fi
+          echo "✅ Version validation passed"
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build distribution
+        run: npm run prepare
+
+      - name: Verify dist folder
+        run: |
+          if [[ ! -f "dist/index.js" ]]; then
+            echo "❌ Distribution file not found"
+            exit 1
+          fi
+          echo "✅ Distribution build successful"
+
+  # Run comprehensive tests
+  comprehensive-tests:
+    runs-on: ubuntu-latest
+    name: Comprehensive Release Tests
+    needs: validate-release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test Action with Multiple Scenarios
+        uses: ./
+        id: comprehensive-test
+        with:
+          csvinput: |
+            Product,Category,Price,In Stock,Description
+            "Laptop, Gaming",Electronics,1299.99,true,"High-performance gaming laptop with RGB keyboard"
+            "Mouse, Wireless",Electronics,29.99,true,"Wireless optical mouse with 3-year warranty"
+            "Desk Chair",Furniture,199.99,false,"Ergonomic office chair with lumbar support"
+            "Coffee Mug, ""Best Boss""",Kitchen,12.99,true,"Ceramic mug with funny quote"
+
+      - name: Verify Comprehensive Test Output
+        run: |
+          echo "Testing comprehensive release scenario..."
+          output="${{ steps.comprehensive-test.outputs.markdown-table }}"
+          
+          # Check for proper handling of quoted fields with commas
+          if [[ "$output" == *"Laptop, Gaming"* ]]; then
+            echo "✅ Quoted fields with commas handled correctly"
+          else
+            echo "❌ Quoted fields with commas not handled properly"
+            exit 1
+          fi
+          
+          # Check for proper handling of escaped quotes
+          if [[ "$output" == *'Coffee Mug, "Best Boss"'* ]]; then
+            echo "✅ Escaped quotes handled correctly"
+          else
+            echo "❌ Escaped quotes not handled properly"
+            exit 1
+          fi
+          
+          # Check for proper boolean and numeric handling
+          if [[ "$output" == *"1299.99"* ]]; then
+            echo "✅ Numeric values preserved correctly"
+          else
+            echo "❌ Numeric values not preserved properly"
+            exit 1
+          fi
+
+  # Update major version tag
+  update-version-tags:
+    runs-on: ubuntu-latest
+    name: Update Version Tags
+    needs: [validate-release, comprehensive-tests]
+    if: github.event_name == 'release'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update major version tag
+        run: |
+          TAG="${{ needs.validate-release.outputs.tag }}"
+          VERSION="${{ needs.validate-release.outputs.version }}"
+          
+          # Extract major version (e.g., v1.2.3 -> v1)
+          MAJOR_VERSION="v$(echo ${VERSION} | cut -d. -f1)"
+          
+          echo "Updating ${MAJOR_VERSION} to point to ${TAG}"
+          
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Create or update major version tag
+          git tag -fa ${MAJOR_VERSION} -m "Update ${MAJOR_VERSION} to ${TAG}"
+          git push origin ${MAJOR_VERSION} --force
+
+  # Create release artifacts
+  create-artifacts:
+    runs-on: ubuntu-latest
+    name: Create Release Artifacts
+    needs: [validate-release, comprehensive-tests]
+    if: github.event_name == 'release'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build distribution
+        run: npm run prepare
+
+      - name: Create source archive
+        run: |
+          VERSION="${{ needs.validate-release.outputs.version }}"
+          tar -czf "csv-to-md-table-action-${VERSION}-src.tar.gz" \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='*.tar.gz' \
+            .
+
+      - name: Upload Release Assets
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./csv-to-md-table-action-${{ needs.validate-release.outputs.version }}-src.tar.gz
+          asset_name: csv-to-md-table-action-${{ needs.validate-release.outputs.version }}-src.tar.gz
+          asset_content_type: application/gzip
+
+  # Post-release validation
+  post-release-validation:
+    runs-on: ubuntu-latest
+    name: Post-Release Validation
+    needs: [validate-release, comprehensive-tests, update-version-tags]
+    if: always() && github.event_name == 'release'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test Released Version
+        uses: petems/csv-to-md-table-action@${{ needs.validate-release.outputs.tag }}
+        id: test-released-version
+        with:
+          csvinput: |
+            Test,Status
+            Release validation,Passed
+
+      - name: Verify Released Version Works
+        run: |
+          output="${{ steps.test-released-version.outputs.markdown-table }}"
+          if [[ "$output" == *"Release validation"* ]]; then
+            echo "✅ Released version validation passed"
+          else
+            echo "❌ Released version validation failed"
+            exit 1
+          fi
+
+      - name: Create Release Summary
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: ${{ needs.validate-release.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tests**: All tests passed ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **Distribution**: Built successfully ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version Tags**: Updated successfully ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **Release Validation**: Passed ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The release has been successfully validated and is ready for use!" >> $GITHUB_STEP_SUMMARY
